@@ -1,10 +1,13 @@
 # !/usr/bin/env python
 
+
+# ** boto version 2.5.2 required
+
 import os
 import sys
 
 import boto
-from boto.ec2.regioninfo import RegionInfo validate_certs=False
+from boto.ec2.regioninfo import RegionInfo
 
 
 access_id = "h6X3iTOHQdoRJnDmTy68j"
