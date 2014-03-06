@@ -24,6 +24,10 @@ case $SYSNAME in
     LOGPATH=/ion-alpha/r2/fetch-logs
     ssh buildbot-runner@buildbot -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/ionalpha.properties --status' > /tmp/proclist
     ;;
+  r3_test_system1)
+    LOGPATH=/ion-alpha/r3/fetch-logs
+    ssh buildbot-runner@buildbot -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/ionalpha_r3.properties --status' > /tmp/proclist
+    ;;
   r2_dev)
     LOGPATH=/ion-dev/r2/fetch-logs
     ssh buildbot-runner@buildbot -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/iondev.properties --status' > /tmp/proclist
