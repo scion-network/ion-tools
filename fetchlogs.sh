@@ -52,4 +52,7 @@ for i in `cat /tmp/hostlist`; do
   ssh root@$i -o StrictHostKeyChecking=no "mkdir -p $LOGPATH/$SYSNAME/$DATE/$i; rsync -rltm --include='*.log' -f 'hide,! */' /home/cc/ $LOGPATH/$SYSNAME/$DATE/$i/"
 done
 
+# find any logs with 600 perms and change to 644
+ssh root@$CLEAN_HOST -o StrictHostKeyChecking=no "find $LOGPATH/$SYSNAME/$DATE -perm 600 | xargs chmod 644"
+
 echo "Logs for $SYSNAME written to $LOGPATH/$SYSNAME/$DATE"
