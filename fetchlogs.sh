@@ -36,6 +36,10 @@ case $SYSNAME in
     LOGPATH=/ion-stage/r2/fetch-logs
     ssh jenkins@jenkins-pl -o StrictHostKeyChecking=no '~/nimbus-cloud-client-020/bin/cloud-client.sh --conf ~/nimbus-cloud-client-020/conf/ionstage.properties --status' > /tmp/proclist
     ;;
+  R2_BETA_SYSTEM)
+    LOGPATH=/ion-beta/r2/fetch-logs
+    ssh jenkins@pub-4-100.dev -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/ionbeta.properties --status' > /tmp/proclist
+    ;;
   *)
     echo "sysname invalid"
     exit -1
