@@ -40,6 +40,10 @@ case $SYSNAME in
     LOGPATH=/ion-beta/r2/fetch-logs
     ssh jenkins@pub-4-100.dev -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/ionbeta.properties --status' > /tmp/proclist
     ;;
+  R3_BETA_SYSTEM)
+    LOGPATH=/ion-beta/r3/fetch-logs
+    ssh jenkins@r2-dev1 -o StrictHostKeyChecking=no '~/nimbus-cloud-client-018/bin/cloud-client.sh --conf ~/nimbus-cloud-client-018/conf/r3-beta.properties --status' > /tmp/proclist
+    ;;
   *)
     echo "sysname invalid"
     exit -1
@@ -53,7 +57,7 @@ ssh root@$CLEAN_HOST -o StrictHostKeyChecking=no "find $LOGPATH/$SYSNAME -maxdep
 
 # loop through host list to cp logs
 for i in `cat /tmp/hostlist`; do
-  ssh root@$i -o StrictHostKeyChecking=no "mkdir -p $LOGPATH/$SYSNAME/$DATE/$i; rsync -rltm --include='*.log' -f 'hide,! */' /home/cc/ $LOGPATH/$SYSNAME/$DATE/$i/"
+  ssh root@$i -o StrictHostKeyChecking=no "mkdir -p $LOGPATH/$SYSNAME/$DATE/$i; rsync -rltm --include='*.log*' -f 'hide,! */' /home/cc/ $LOGPATH/$SYSNAME/$DATE/$i/"
 done
 
 # find any logs with 600 perms and change to 644
