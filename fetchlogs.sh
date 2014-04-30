@@ -10,7 +10,8 @@ DATE=`date +%F_%H%M`
 DAYS_TO_KEEP=5
 
 if [ -z $SYSNAME ]; then
-  echo "Usage: $0 [sysname]"
+  echo "Usage: $0 [sysname], where sysname in r2_full,r2_test_system1, \
+      r3_test_system1,r2_dev,R2_STAGE_SYSTEM,R2_BETA_SYSTEM,R3_BETA_SYSTEM."
   exit -1
 fi
 
