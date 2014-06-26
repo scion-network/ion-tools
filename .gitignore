@@ -1,0 +1,4 @@
+iondiag/*.cfg
+iondiag/sysinfo*
+.DS_Store
+*/.DS_Store
