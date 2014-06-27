@@ -34,6 +34,7 @@ class IonDiagnose(object):
         parser.add_argument('-L', '--level', type=str, help='Minimum warning level', default="WARN")
         parser.add_argument('-n', '--no_save', action='store_true', help="Don't store system info")
         parser.add_argument('-i', '--interactive', action='store_true', help="Drop into interactive shell")
+        parser.add_argument('-q', '--quick', action='store_true', help="Quick mode - only retrieve basic info")
         parser.add_argument('-v', '--verbose', action='store_true', help="Verbose output")
         parser.add_argument('-R', '--only_retrieve', type=str, help='Restict retrieve to D, R, C', default="rdc")
         parser.add_argument('-O', '--only_do', type=str, help='Restict diag to D, R, C', default="rdc")
@@ -97,10 +98,11 @@ class IonDiagnose(object):
         rabbit_info["exchanges"] = resp.json()
         print "  ...retrieved %s exchanges" % (len(rabbit_info["exchanges"]))
 
-        url5 = url_prefix + "/api/bindings"
-        resp = requests.get(url5, auth=HTTPBasicAuth(mgmt["username"], mgmt["password"]))
-        rabbit_info["bindings"] = resp.json()
-        print "  ...retrieved %s bindings" % (len(rabbit_info["bindings"]))
+        if not self.opts.quick:
+            url5 = url_prefix + "/api/bindings"
+            resp = requests.get(url5, auth=HTTPBasicAuth(mgmt["username"], mgmt["password"]))
+            rabbit_info["bindings"] = resp.json()
+            print "  ...retrieved %s bindings" % (len(rabbit_info["bindings"]))
 
     def _get_db_info(self):
         from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -139,6 +141,11 @@ class IonDiagnose(object):
         dsn = "host=%s port=%s dbname=%s user=%s password=%s" % (pgcfg["host"], pgcfg["port"], db_name, pgcfg["username"], pgcfg["password"])
         return psycopg2.connect(dsn), dsn
 
+    prefix_blacklist = ["/dtrs",
+                        "/epum/elections",
+                        "/pd/elections",
+                        "/provisioner"]
+
     def _get_cei_info(self):
         cei_info = self.sysinfo.setdefault("cei", {})
 
@@ -151,7 +158,7 @@ class IonDiagnose(object):
 
         self.queue = Queue.Queue()
         self.queue.put(start_node)
-        num_threads = 25
+        num_threads = 40 if self.opts.quick else 25
         res_info, threads = [], []
         for i in range(num_threads):
             th_info = {}
@@ -190,6 +197,8 @@ class IonDiagnose(object):
                 ch_nodes = zk.get_children(node)
                 for ch in ch_nodes:
                     ch_node = node + "/" + ch
+                    if any([pre in ch_node for pre in self.prefix_blacklist]):
+                        continue
                     self.queue.put(ch_node)
                 node = self.queue.get(True, 0.5)
         except Queue.Empty:
@@ -670,8 +679,15 @@ class IonDiagnose(object):
                     num_consumers = queue["consumers"]
             if num_consumers == 0:
                 aproc_entry = self._allprocs[ag_pid]
-                self._warn("cei.ing_worker", 2, "Agent %s has NO consumer (%s/%s %s)", ag_pid, aproc_entry["epu"],
+                self._warn("cei.agent_proc", 2, "Agent %s has NO consumer (%s/%s %s)", ag_pid, aproc_entry["epu"],
                                    aproc_entry["node_id"], aproc_entry["hostname"])
+            if ag_pid not in self._agents:
+                aproc_entry = self._allprocs[ag_pid]
+                self._warn("cei.agent_stale", 2, "Agent %s is not listed in directory  (%s/%s %s)", ag_pid, aproc_entry["epu"],
+                                   aproc_entry["node_id"], aproc_entry["hostname"])
+
+        # Find more than 1 agent process for a device - compare with directory
+
 
     def _diag_db(self):
         print "-----------------------------------------------------"
