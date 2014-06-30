@@ -112,21 +112,28 @@ class IonDiagnose(object):
             print " Getting DB info from PostgreSQL as:", dsn.rsplit("=", 1)[0] + "=***"
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             with conn.cursor() as cur:
-                cur.execute("SELECT id,doc FROM ion_resources")
-                rows = cur.fetchall()
-                resources = {}
-                for row in rows:
-                    res_id, res_doc = row[0], row[1]
-                    resources[res_id] = res_doc
-                print "  ...retrieved %s resources" % (len(resources))
-                db_info["resources"] = resources
+                if not self.opts.quick:
+                    cur.execute("SELECT id,doc FROM ion_resources")
+                    rows = cur.fetchall()
+                    resources = {}
+                    for row in rows:
+                        res_id, res_doc = row[0], row[1]
+                        resources[res_id] = res_doc
+                    print "  ...retrieved %s resources" % (len(resources))
+                    db_info["resources"] = resources
 
                 cur.execute("SELECT id,doc FROM ion_resources_dir")
                 rows = cur.fetchall()
                 dir_entries = {}
                 for row in rows:
                     dir_id, dir_doc = row[0], row[1]
-                    dir_entries[dir_id] = dir_doc
+                    if dir_id in dir_entries:
+                        self._warn("dir.dup", 2, "Directory entry %s duplicate", dir_id)
+                        old_entry = dir_entries[dir_id]
+                        if int(dir_doc["ts_updated"]) > int(old_entry["ts_updated"]):
+                            dir_entries[dir_id] = dir_doc
+                    else:
+                        dir_entries[dir_id] = dir_doc
                 print "  ...retrieved %s directory entries" % (len(dir_entries))
                 db_info["directory"] = dir_entries
         finally:
@@ -197,7 +204,7 @@ class IonDiagnose(object):
                 ch_nodes = zk.get_children(node)
                 for ch in ch_nodes:
                     ch_node = node + "/" + ch
-                    if any([pre in ch_node for pre in self.prefix_blacklist]):
+                    if self.opts.quick and any([pre in ch_node for pre in self.prefix_blacklist]):
                         continue
                     self.queue.put(ch_node)
                 node = self.queue.get(True, 0.5)
@@ -407,6 +414,13 @@ class IonDiagnose(object):
         if total_messages > 200:
             self._warn("rabbit.waiting_msgs", 1, "System has %s unconsumed messages", total_messages)
 
+    def _get_cei_ts(self, cei_ts):
+        sec_ts = cei_ts.split(".",1)[0]
+        sec_ts = sec_ts.split("+",1)[0]
+        t1 = time.mktime(datetime.datetime.strptime(sec_ts, "%Y-%m-%dT%H:%M:%S").timetuple())
+        t2 = t1 - 7*60*60
+        return t2
+
     def _diag_cei(self):
         print "-----------------------------------------------------"
         print "Analyzing CEI info..."
@@ -477,10 +491,17 @@ class IonDiagnose(object):
             ee_entry = dict(name=ee_name, node_id=ee_data["node_id"], state=ee_data["state"], zoo=ee,
                             epu=epui_data.get("epu", "ERR"),
                             hostname=epui_data.get("hostname", "ERR"),
+                            last_heartbeat=ee_data["last_heartbeat"],
+                            last_heartbeat_ts=self._get_cei_ts(ee_data["last_heartbeat"]),
                             num_procs=len(ee_data["assigned"]))
             self._ees[ee_name] = ee_entry
             if ee_entry["state"] != "OK":
                 self._warn("cei.ee_state", 2, "EE %s state: %s", ee_name, ee_entry["state"])
+            else:
+                if ee_entry["last_heartbeat_ts"] + 60*10 < (self._rabbit_max_ts / 1000):
+                    self._warn("cei.ee_ts", 2, "EE %s %s/%s (%s) heartbeat overdue: %s (vs %s)", ee_name, ee_entry["epu"], ee_entry["node_id"], ee_entry["hostname"],
+                               self.ts(ee_entry["last_heartbeat_ts"]), self.ts(self._rabbit_max_ts / 1000))
+
             if not ee_data["assigned"]:
                 self._info("cei.ee_assign", 2, "EE %s %s/%s (%s) has no processes (state %s)", ee_name, ee_entry["epu"], ee_entry["node_id"], ee_entry["hostname"], ee_entry["state"])
             total_ee_procs += len(ee_data["assigned"])
