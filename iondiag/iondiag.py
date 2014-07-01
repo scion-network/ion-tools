@@ -38,6 +38,7 @@ class IonDiagnose(object):
         parser.add_argument('-v', '--verbose', action='store_true', help="Verbose output")
         parser.add_argument('-R', '--only_retrieve', type=str, help='Restict retrieve to D, R, C', default="rdc")
         parser.add_argument('-O', '--only_do', type=str, help='Restict diag to D, R, C', default="rdc")
+        parser.add_argument('-H', '--hide_prefix', type=str, help='Hide warning prefix', default="")
         self.opts, self.extra = parser.parse_known_args()
 
     def read_config(self, filename=None):
@@ -54,6 +55,9 @@ class IonDiagnose(object):
         if not self.cfg:
             self._errout("No config")
         self.sysname = self.cfg["system"]["name"]
+        self._hide_warn_pre_list = []
+        if self.opts.hide_prefix:
+            self._hide_warn_pre_list = self.opts.hide_prefix.split(",")
 
     # -------------------------------------------------------------------------
 
@@ -318,9 +322,11 @@ class IonDiagnose(object):
 
         self._agents = {}
         self._agent_by_resid = {}
+        self._agentdup_by_resid = {}
         self._agent_by_type = {}
         directory = self.sysinfo.get("db", {}).get("directory", None)
         if directory:
+
             for de in directory.values():
                 if de["parent"] == "/Agents":
                     attrs = de["attributes"]
@@ -336,6 +342,8 @@ class IonDiagnose(object):
                         agent_type = "InstrumentAgent"
                     elif "PlatformAgent" in agent_name:
                         agent_type = "PlatformAgent"
+                    else:
+                        print "  Cannot categorize agent:", agent_id
                     if agent_id in self._agents:
                         self._warn("dir", 2, "Agent %s multiple times in directory", agent_id)
                     agent_entry = dict(key=agent_id, agent_name=agent_name, agent_type=agent_type, resource_id=resource_id)
@@ -343,11 +351,17 @@ class IonDiagnose(object):
                     self._agent_by_type.setdefault(agent_type, []).append(agent_id)
                     if resource_id and resource_id in self._res_by_id:
                         if resource_id in self._agent_by_resid:
-                            res_obj = self._res_by_id.get(resource_id, None)
-                            self._warn("", 2, "Resource %s (%s)s has multiple agents in dir: %s", resource_id,
-                                       res_obj["name"] if res_obj else "ERR", agent_id)
+                            self._agentdup_by_resid.setdefault(resource_id, []).append(agent_id)
                         self._agent_by_resid[resource_id] = agent_id
             print " ...found %s agents in directory (%s for resources)" % (len(self._agents), len(self._agent_by_resid))
+
+            if self._agentdup_by_resid:
+                for resource_id, ag_list in self._agentdup_by_resid.iteritems():
+                    ag_list.append(self._agent_by_resid[resource_id])
+                    res_obj = self._res_by_id.get(resource_id, None)
+                    self._warn("db.dir_resagent", 2, "Resource %s (%s) has multiple agents in dir: \n   %s", resource_id,
+                               res_obj["name"] if res_obj else "ERR", "\n   ".join(aid for aid in ag_list))
+
 
     def _diag_rabbit(self):
         print "-----------------------------------------------------"
@@ -782,13 +796,40 @@ class IonDiagnose(object):
             #if self.opts.verbose:
             #    self._warn("cei.agent_bad", 2, "Bad agent procs: \n   %s", "\n   ".join(["%s - %s" % (a["name"], a["state"]) for a in bad_agent]))
 
-        # Find more than 1 agent process for a device - compare with directory
-
 
     def _diag_db(self):
         print "-----------------------------------------------------"
         print "Analyzing DB info..."
-        print " (TBD)"
+
+        # Check directory agents vs. running procs
+        print " Analyzing directory listed agents..."
+        num_ag, num_ag_ok, num_ag_bad, num_ag_term, num_ag_noproc = 0, 0, 0, 0, 0
+        for ag_entry in self._agents.values():
+            if ag_entry["agent_type"] not in {"DatasetAgent", "InstrumentAgent", "PlatformAgent"}:
+                # also: "EEAgent", "HAAgent"
+                continue
+            agent_id = ag_entry["key"]
+            res_obj = self._res_by_id.get(ag_entry["resource_id"], None)
+            num_ag += 1
+
+            if agent_id in self._procs:
+                num_ag_ok += 1
+            elif agent_id in self._oldprocs:
+                self._warn("db.dir_agent_oldproc", 2, "Agent %s (for %s %s) CEI process terminated", agent_id,
+                           ag_entry["resource_id"], res_obj["name"] if res_obj else "ERR")
+                num_ag_term += 1
+            elif agent_id in self._badprocs:
+                self._warn("db.dir_agent_badproc", 2, "Agent %s (for %s %s) CEI process in bad state", agent_id,
+                           ag_entry["resource_id"], res_obj["name"] if res_obj else "ERR")
+                num_ag_bad += 1
+
+            if agent_id not in self._allprocs:
+                self._warn("db.dir_agent_noproc", 2, "Agent %s (for %s %s) has no CEI process", agent_id,
+                           ag_entry["resource_id"], res_obj["name"] if res_obj else "ERR")
+                num_ag_noproc += 1
+
+        print "  ...found %s agents: %s OK, %s with bad proc, %s with terminated proc" % (
+            num_ag, num_ag_ok, num_ag_bad, num_ag_term)
 
     # -------------------------------------------------------------------------
 
@@ -839,6 +880,7 @@ class IonDiagnose(object):
             msgstr = prefix + msg
         self.msgs.append((category, indent, level, msgstr))
 
+
         # Print output
         color = self.COLOR_MAP.get(level, "")
         if color:
@@ -851,7 +893,13 @@ class IonDiagnose(object):
             if level == "ERR":
                 print msgstr
         else:
-            print msgstr
+            hide_it = False
+            for hide_pre in self._hide_warn_pre_list:
+                if hide_pre and category.startswith(hide_pre):
+                    hide_it = True
+                    break
+            if not hide_it:
+                print msgstr
 
     def _errout(self, msg=None):
         if msg:
