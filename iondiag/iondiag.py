@@ -324,8 +324,7 @@ class IonDiagnose(object):
             for de in directory.values():
                 if de["parent"] == "/Agents":
                     attrs = de["attributes"]
-                    agent_type = "?"
-                    agent_name = attrs.get("name", "")
+                    agent_id, agent_name, agent_type = de["key"], attrs.get("name", ""), "?"
                     resource_id = attrs.get("resource_id", "")
                     if agent_name.startswith("eeagent"):
                         agent_type = "EEAgent"
@@ -337,13 +336,17 @@ class IonDiagnose(object):
                         agent_type = "InstrumentAgent"
                     elif "PlatformAgent" in agent_name:
                         agent_type = "PlatformAgent"
-                    if de["key"] in self._agents:
-                        self._warn("dir", 2, "Agent %s multiple times in directory", de["key"])
-                    agent_entry = dict(key=de["key"], agent_name=agent_name, agent_type=agent_type)
-                    self._agents[de["key"]] = agent_entry
-                    self._agent_by_type.setdefault(agent_type, []).append(agent_name)
+                    if agent_id in self._agents:
+                        self._warn("dir", 2, "Agent %s multiple times in directory", agent_id)
+                    agent_entry = dict(key=agent_id, agent_name=agent_name, agent_type=agent_type, resource_id=resource_id)
+                    self._agents[agent_id] = agent_entry
+                    self._agent_by_type.setdefault(agent_type, []).append(agent_id)
                     if resource_id and resource_id in self._res_by_id:
-                        self._agent_by_resid[resource_id] = de["key"]
+                        if resource_id in self._agent_by_resid:
+                            res_obj = self._res_by_id.get(resource_id, None)
+                            self._warn("", 2, "Resource %s (%s)s has multiple agents in dir: %s", resource_id,
+                                       res_obj["name"] if res_obj else "ERR", agent_id)
+                        self._agent_by_resid[resource_id] = agent_id
             print " ...found %s agents in directory (%s for resources)" % (len(self._agents), len(self._agent_by_resid))
 
     def _diag_rabbit(self):
@@ -626,8 +629,10 @@ class IonDiagnose(object):
         if suspect_ees:
             for ee_name in sorted(suspect_ees):
                 ee_data = self._ees[ee_name]
-                self._warn("cei.susp_ee", 2, "EE has non-OK processes: %s on %s/%s (%s)", ee_name,
-                           ee_data["epu"], ee_data["node_id"], ee_data["hostname"],)
+                bad_ee_procs = [p for p in self._badprocs.values() if p["ee"] == ee_name]
+                self._warn("cei.susp_ee", 2, "EE has non-OK processes: %s on %s/%s (%s). %s bad, %s total", ee_name,
+                           ee_data["epu"], ee_data["node_id"], ee_data["hostname"],
+                           len(bad_ee_procs), ee_data["num_procs"])
 
         unaccounted_procs = set(procs_in_ee) - set(self._procs.keys()) - set(self._badprocs.keys())
         if unaccounted_procs:
@@ -751,7 +756,7 @@ class IonDiagnose(object):
                 self._warn("cei.ing_worker", 2, "Ingestion worker %s has NO consumer (%s/%s %s)", ing_pid, iproc_entry["epu"],
                                    iproc_entry["node_id"], iproc_entry["hostname"])
 
-        # Check MI agents
+        # Check dataset, instrument, platform agents
         agent_pids = self._proc_by_type.get("instrument_agent", []) + self._proc_by_type.get("platform_agent", []) + self._proc_by_type.get("dataset_agent", [])
         running_agent = [self._zoo[self._procs[x]["zoo"]] for x in agent_pids if x in self._procs]
         print " Analyzing agents: %s active..." % (len(running_agent))
@@ -770,6 +775,12 @@ class IonDiagnose(object):
                 aproc_entry = self._allprocs[ag_pid]
                 self._warn("cei.agent_stale", 2, "Agent %s is not listed in directory  (%s/%s %s)", ag_pid, aproc_entry["epu"],
                                    aproc_entry["node_id"], aproc_entry["hostname"])
+
+        bad_agent = [self._zoo[self._allprocs[x]["zoo"]] for x in agent_pids if x in self._badprocs]
+        if bad_agent:
+            self._warn("cei.agent_bad", 2, "Found %s agent processes in bad state", len(bad_agent))
+            #if self.opts.verbose:
+            #    self._warn("cei.agent_bad", 2, "Bad agent procs: \n   %s", "\n   ".join(["%s - %s" % (a["name"], a["state"]) for a in bad_agent]))
 
         # Find more than 1 agent process for a device - compare with directory
 
