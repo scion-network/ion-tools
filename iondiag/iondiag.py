@@ -16,6 +16,14 @@ import yaml
 import sys
 import Queue
 
+SERVICE_NAMES = ['agent_management', 'catalog_management', 'conversation_management', 'data_acquisition_management',
+    'data_process_management', 'data_product_management', 'data_retriever', 'dataset_management', 'directory',
+    'discovery', 'event_management', 'exchange_management', 'identity_management', 'index_management',
+    'ingestion_management', 'instrument_management', 'object_management', 'observatory_management', 'org_management',
+    'policy_management', 'preservation_management', 'process_dispatcher', 'provisioner', 'pubsub_management',
+    'resource_management', 'resource_registry', 'scheduler', 'service_gateway', 'service_management',
+    'system_management', 'user_notification', 'visualization', 'workflow_management']
+
 
 class IonDiagnose(object):
 
@@ -108,6 +116,48 @@ class IonDiagnose(object):
             rabbit_info["bindings"] = resp.json()
             print "  ...retrieved %s bindings" % (len(rabbit_info["bindings"]))
 
+            url6 = url_prefix + "/api/channels"
+            resp = requests.get(url6, auth=HTTPBasicAuth(mgmt["username"], mgmt["password"]))
+            rabbit_info["channels"] = resp.json()
+            print "  ...retrieved %s channels" % (len(rabbit_info["channels"]))
+
+        rabbit_info["queue_details"] = {}
+        queue_names = {q["name"] for q in rabbit_info["queues"]}
+        svc_queue_names = [sn for sn in SERVICE_NAMES if self.sysname + "." + sn in queue_names]
+        queue_urls = [url_prefix + "/api/queues/%2F/" + self.sysname + "." + sn for sn in svc_queue_names]
+
+        num_threads = 5
+        res_info, threads = [], []
+        for i in range(num_threads):
+            begin_range = ((len(queue_urls) / num_threads) + 1) * i
+            end_range = ((len(queue_urls) / num_threads) + 1) * (i+1)
+            work_urls = dict(zip(queue_urls[begin_range:end_range], svc_queue_names[begin_range:end_range]))
+            th_info = {}
+            res_info.append(th_info)
+            t = threading.Thread(target=self._rabbit_get_thread, args=(work_urls, th_info, i))
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        queue_details = {}
+        for q_info in res_info:
+            queue_details.update(q_info)
+        rabbit_info["queue_details"] = queue_details
+        print "  ...retrieved %s queue details" % (len(rabbit_info["queue_details"]))
+
+    def _rabbit_get_thread(self, urls, th_info, num):
+        import requests
+        from requests.auth import HTTPBasicAuth
+        mgmt = self.cfg["container"]["exchange"]["management"]
+        url_prefix = "http://%s:%s" % (mgmt["host"], mgmt["port"])
+        for url, reskey in urls.iteritems():
+            try:
+                resp = requests.get(url, auth=HTTPBasicAuth(mgmt["username"], mgmt["password"]))
+                th_info[reskey] = resp.json()
+            except Exception as ex:
+                print " Error getting rabbit URL %s: %s" % (url, ex)
+
     def _get_db_info(self):
         from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
         conn, dsn = self._get_db_connection()
@@ -132,10 +182,7 @@ class IonDiagnose(object):
                 for row in rows:
                     dir_id, dir_doc = row[0], row[1]
                     if dir_id in dir_entries:
-                        self._warn("dir.dup", 2, "Directory entry %s duplicate", dir_id)
-                        old_entry = dir_entries[dir_id]
-                        if int(dir_doc["ts_updated"]) > int(old_entry["ts_updated"]):
-                            dir_entries[dir_id] = dir_doc
+                        self._warn("dir.dup", 2, "Directory entry with id=%s duplicate", dir_id)
                     else:
                         dir_entries[dir_id] = dir_doc
                 print "  ...retrieved %s directory entries" % (len(dir_entries))
@@ -234,9 +281,11 @@ class IonDiagnose(object):
         rabbit_info = self.sysinfo.get("rabbit", None)
         self._save_file(rabbit_pre, "overview", rabbit_info)
         self._save_file(rabbit_pre, "queues", rabbit_info)
+        self._save_file(rabbit_pre, "queue_details", rabbit_info)
         self._save_file(rabbit_pre, "connections", rabbit_info)
         self._save_file(rabbit_pre, "exchanges", rabbit_info)
         self._save_file(rabbit_pre, "bindings", rabbit_info)
+        self._save_file(rabbit_pre, "channels", rabbit_info)
 
         db_pre = "%s/%s" % (path, "db")
         db_info = self.sysinfo.get("db", None)
@@ -267,9 +316,11 @@ class IonDiagnose(object):
         rabbit_info = self.sysinfo.setdefault("rabbit", {})
         self._read_file(rabbit_pre, "overview", rabbit_info)
         self._read_file(rabbit_pre, "queues", rabbit_info)
+        self._read_file(rabbit_pre, "queue_details", rabbit_info)
         self._read_file(rabbit_pre, "connections", rabbit_info)
         self._read_file(rabbit_pre, "exchanges", rabbit_info)
         self._read_file(rabbit_pre, "bindings", rabbit_info)
+        self._read_file(rabbit_pre, "channels", rabbit_info)
 
         db_pre = "%s/%s" % (path, "db")
         db_info = self.sysinfo.setdefault("db", {})
@@ -321,13 +372,14 @@ class IonDiagnose(object):
         print " ...found %s services in RR" % len(self._services)
 
         self._agents = {}
+        self._agentdup = []
         self._agent_by_resid = {}
         self._agentdup_by_resid = {}
         self._agent_by_type = {}
         directory = self.sysinfo.get("db", {}).get("directory", None)
         if directory:
-
             for de in directory.values():
+                # Extract agent info
                 if de["parent"] == "/Agents":
                     attrs = de["attributes"]
                     agent_id, agent_name, agent_type = de["key"], attrs.get("name", ""), "?"
@@ -345,19 +397,23 @@ class IonDiagnose(object):
                     else:
                         print "  Cannot categorize agent:", agent_id
                     if agent_id in self._agents:
-                        self._warn("dir", 2, "Agent %s multiple times in directory", agent_id)
-                    agent_entry = dict(key=agent_id, agent_name=agent_name, agent_type=agent_type, resource_id=resource_id)
+                        self._warn("dir", 2, "Agent id=%s multiple times in directory", agent_id)
+                        self._agentdup.append(agent_id)
+                    agent_entry = dict(key=agent_id, agent_name=agent_name,
+                                       agent_type=agent_type,
+                                       resource_id=resource_id)
                     self._agents[agent_id] = agent_entry
                     self._agent_by_type.setdefault(agent_type, []).append(agent_id)
                     if resource_id and resource_id in self._res_by_id:
                         if resource_id in self._agent_by_resid:
-                            self._agentdup_by_resid.setdefault(resource_id, []).append(agent_id)
-                        self._agent_by_resid[resource_id] = agent_id
+                            self._agentdup_by_resid.setdefault(resource_id, set()).add(agent_id)
+                        else:
+                            self._agent_by_resid[resource_id] = agent_id
             print " ...found %s agents in directory (%s for resources)" % (len(self._agents), len(self._agent_by_resid))
 
             if self._agentdup_by_resid:
                 for resource_id, ag_list in self._agentdup_by_resid.iteritems():
-                    ag_list.append(self._agent_by_resid[resource_id])
+                    ag_list.add(self._agent_by_resid[resource_id])
                     res_obj = self._res_by_id.get(resource_id, None)
                     self._warn("db.dir_resagent", 2, "Resource %s (%s) has multiple agents in dir: \n   %s", resource_id,
                                res_obj["name"] if res_obj else "ERR", "\n   ".join(aid for aid in ag_list))
@@ -367,6 +423,7 @@ class IonDiagnose(object):
         print "-----------------------------------------------------"
         print "Analyzing RabbitMQ info..."
         rabbit = self.sysinfo.get("rabbit", {})
+        self._rabbit = rabbit
         if not rabbit:
             return
 
@@ -428,7 +485,13 @@ class IonDiagnose(object):
         total_messages = 0
         for q in self._named_queues.values():
             if q["messages"] > 2:
-                self._warn("rabbit.qu_msgs", 2, "Queue %s has unconsumed messages: %s (idle since %s)", q["name"], q["messages"], q.get("idle_since", ""))
+                self._warn("rabbit.qu.msgs.named", 2, "Queue %s has unconsumed messages: %s (idle since %s), %s consumers",
+                           q["name"], q["messages"], q.get("idle_since", ""), q["consumers"])
+            total_messages += q["messages"]
+        for q in anon_queues:
+            if q["messages"] > 2:
+                self._warn("rabbit.qu.msgs.anon", 2, "Queue %s has unconsumed messages: %s (idle since %s), %s consumers",
+                           q["name"], q["messages"], q.get("idle_since", ""), q["consumers"])
             total_messages += q["messages"]
         if total_messages > 200:
             self._warn("rabbit.waiting_msgs", 1, "System has %s unconsumed messages", total_messages)
@@ -584,10 +647,11 @@ class IonDiagnose(object):
             proc_data = zoo[proc]
             proc_id = proc_data["upid"]
             ee_data = self._ees.get(proc_data["assigned"], {})
-            proc_entry = dict(upid=proc_id, ee=proc_data["assigned"], name=proc_data["name"] or "", zoo=proc,
+            proc_entry = dict(upid=proc_id, name=proc_data["name"] or "", zoo=proc,
                               num_starts=proc_data["starts"],
                               restart_mode=proc_data["restart_mode"], queueing_mode=proc_data["queueing_mode"],
                               state=proc_data["state"],
+                              ee=proc_data["assigned"],
                               node_id=ee_data.get("node_id", ""),
                               epu=ee_data.get("epu", ""),
                               epui=ee_data.get("epui", ""),
@@ -600,7 +664,10 @@ class IonDiagnose(object):
                 self._oldprocs[proc_id] = proc_entry
             else:
                 self._badprocs[proc_id] = proc_entry
-                suspect_ees.add(proc_entry["ee"])
+                if proc_entry["ee"]:
+                    suspect_ees.add(proc_entry["ee"])
+                elif proc_entry["state"] not in {"100-UNSCHEDULED", "200-REQUESTED", "300-WAITING"}:
+                    self._warn("cei.proc_ee_assign", 3, "Process %s has non existing EE assignment", proc_id)
             self._allprocs[proc_id] = proc_entry
 
             # Categorize process
@@ -703,6 +770,7 @@ class IonDiagnose(object):
         # Check HA Agents
         self._ha_agents = {}
         running_ha = [self._zoo[self._procs[x]["zoo"]] for x in self._proc_by_type["ha_agent"] if x in self._procs]
+        all_bad_conn = set()
         print " Analyzing HA-Agents: %s active..." % (len(running_ha))
         for ha_proc in running_ha:
             ha_cfg = ha_proc["configuration"]["highavailability"]
@@ -711,28 +779,39 @@ class IonDiagnose(object):
                             npreserve=ha_cfg["policy"]["parameters"]["preserve_n"])
             self._ha_agents[ha_name] = ha_entry
 
-            # Check running process instances for HA
+            # Check OK worker processes for HA
             ha_workers = [pid for pid in self._procs if pid.startswith(ha_name)]
             ha_entry["num_workers"] = len(ha_workers)
             ha_entry["workers"] = ha_workers
 
-            num_consumers = -1
+            # TODO: HA agent queue itself
+
+            num_consumers = -2
             if hasattr(self, "_service_queues"):
                 queue = self._service_queues.get(ha_name, None)
-                if queue:
-                    num_consumers = queue["consumers"]
+                num_consumers = queue["consumers"] if queue else -1
             if len(ha_workers) < ha_entry["npreserve"]:
-                self._warn("cei.ha_worker", 2, "HA %s missing workers: preserve_n=%s, running=%s", ha_name,
+                self._warn("cei.ha.worker.cnt.low", 2, "HA %s missing workers: preserve_n=%s, running=%s", ha_name,
+                           ha_entry["npreserve"], len(ha_workers))
+            elif len(ha_workers) > ha_entry["npreserve"]:
+                self._warn("cei.ha.worker.cnt.high", 2, "HA %s has unexpected workers: preserve_n=%s, running=%s", ha_name,
                            ha_entry["npreserve"], len(ha_workers))
             elif self.opts.verbose:
                 print "  HA %s: preserve_n=%s, running=%s, consumers=%s" % (ha_name, ha_entry["npreserve"],
                                                                             len(ha_workers), num_consumers)
-            if num_consumers != -1 and num_consumers < ha_entry["npreserve"]:
+            if num_consumers != -2 and num_consumers != ha_entry["npreserve"]:
                 if num_consumers == 0:
                     self._err("cei.ha_worker", 2, "HA %s has NO consumers: preserve_n=%s, running=%s, consumers=%s", ha_name,
                                ha_entry["npreserve"], len(ha_workers), num_consumers)
-                else:
+                elif num_consumers == -1:
+                    if ha_name not in {"vis_user_queue_monitor", "event_persister", "lightweight_pydap"}:
+                        self._warn("cei.ha_worker", 2, "HA %s cannot determine consumers: preserve_n=%s, running=%s, consumers=%s", ha_name,
+                               ha_entry["npreserve"], len(ha_workers), num_consumers)
+                elif num_consumers < ha_entry["npreserve"]:
                     self._warn("cei.ha_worker", 2, "HA %s missing consumers: preserve_n=%s, running=%s, consumers=%s", ha_name,
+                               ha_entry["npreserve"], len(ha_workers), num_consumers)
+                elif num_consumers > ha_entry["npreserve"]:
+                    self._warn("cei.ha_worker", 2, "HA %s unexpected consumers: preserve_n=%s, running=%s, consumers=%s", ha_name,
                                ha_entry["npreserve"], len(ha_workers), num_consumers)
 
                 for wpid in ha_entry["workers"]:
@@ -745,8 +824,33 @@ class IonDiagnose(object):
                     #print "  ", wpid, hazoo["state"], self.ts(hazoo["dispatch_times"][-1]), wcons
                     if not wcons:
                         wproc_entry = self._allprocs[wpid]
-                        self._warn("cei", 3, "Worker %s has no consumer (%s/%s %s)", wpid, wproc_entry["epu"],
+                        self._warn("cei", 3, "Worker %s has no pid consumer (%s/%s %s)", wpid, wproc_entry["epu"],
                                    wproc_entry["node_id"], wproc_entry["hostname"])
+
+            queue_detail = self.sysinfo.get("rabbit", {}).get("queue_details", {}).get(ha_name, None)
+            if queue_detail:
+                if queue_detail.get("messages_unacknowledged", 0) > 1:
+                    self._warn("cei.ha.queue.unack", 2, "HA %s has %s un-ACK'ed messages, %s ready",
+                               ha_name, queue_detail["messages_unacknowledged"], queue_detail["messages_ready"])
+                deliveries = queue_detail.get("deliveries", [])
+                consumer_details = queue_detail.get("consumer_details", [])
+                #print "   HA %s: %s del, %s cons" % (ha_name, len(deliveries), len(consumer_details))
+                bad_conn, bad_chan = set(), set()
+                for ddetail in deliveries:
+                    stats = ddetail.get("stats", {})
+                    if stats.get("ack", 0) != stats.get("deliver", 0):
+                        bad_conn.add(ddetail.get("channel_details", {}).get("connection_name", "?"))
+                        all_bad_conn.add(ddetail.get("channel_details", {}).get("connection_name", "?"))
+                        bad_chan.add(ddetail.get("channel_details", {}).get("name", "?"))
+                if bad_conn:
+                    for pconn in sorted(bad_conn):
+                        self._warn("cei.ha.queue.badconn", 3, "HA %s has unresponsive workers at connection: %s (%s channels)",
+                                   ha_name, pconn, len(bad_chan))
+
+        if all_bad_conn:
+            for pconn in sorted(all_bad_conn):
+                self._warn("cei.ha.badconn", 2, "Unresponsive workers at connection: %s", pconn)
+
 
         # Check missing HA based on defined service queues
         if hasattr(self, "_service_queues"):
